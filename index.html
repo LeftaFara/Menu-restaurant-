@@ -17,6 +17,15 @@ alter table plats enable row level security;
 create policy "lecture publique" on plats for select using (true);
 create policy "ecriture admin" on plats for all using (true) with check (true);
 alter publication supabase_realtime add table plats;
+
+SQL pour les photos (à exécuter une fois, après le premier SQL) :
+
+alter table plats add column image_url text;
+insert into storage.buckets (id, name, public) values ('plats', 'plats', true) on conflict (id) do nothing;
+create policy "photos lecture" on storage.objects for select using (bucket_id = 'plats');
+create policy "photos ajout" on storage.objects for insert with check (bucket_id = 'plats');
+create policy "photos modif" on storage.objects for update using (bucket_id = 'plats');
+create policy "photos suppression" on storage.objects for delete using (bucket_id = 'plats');
 -->
 
 <style>
@@ -54,6 +63,12 @@ label{font-size:13px;color:var(--mut)}
 #toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:30}
 #toast.on{opacity:1}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.dish{display:flex;gap:12px;align-items:flex-start}.dish .in{flex:1;min-width:0}
+.th{flex:none;width:88px;height:88px;border-radius:10px;object-fit:cover;background:var(--line)}
+.ph0{display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--mut);text-align:center}
+.pbox{display:flex;gap:12px;align-items:center;margin-bottom:8px}
+label.btn{display:inline-block;font-size:15px;color:var(--fg)}
+input[type=file]{position:absolute;opacity:0;width:1px;height:1px;padding:0;border:0;pointer-events:none}
 </style></head><body>
 
 <div id="client">
@@ -88,6 +103,7 @@ label{font-size:13px;color:var(--mut)}
         <select id="n-cat" aria-label="Catégorie"></select>
         <div class="g2"><input id="n-nom" placeholder="Nom du plat"><input id="n-prix" type="number" min="0" step="100" placeholder="Prix"></div>
         <textarea id="n-desc" rows="2" placeholder="Description"></textarea>
+        <div><label class="btn sec" for="n-photo" id="n-photo-l">Ajouter une photo</label><input id="n-photo" type="file" accept="image/*"></div>
       </div>
       <button class="btn" id="add">Ajouter</button>
     </div>
@@ -99,11 +115,13 @@ label{font-size:13px;color:var(--mut)}
 <div id="toast" role="status"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
 <script>
 // Mot de passe de l’espace admin (à changer). Il protège l’interface, pas les données.
-const ADMIN_PASSWORD = "Resto2027";
+const CFG = window.MENU_CONFIG || {};
+const ADMIN_PASSWORD = CFG.password || "admin123";
 // Pour que le menu s’affiche chez vos clients, collez ici l’URL et la clé anonyme.
-const DEFAULT_URL = "https://rastbvlcwvbsiphzvfcx.supabase.co", DEFAULT_KEY = "sb_publishable_wzdbc6WIItdwenT9-UKXKA_i9l-Gx6a";
+const DEFAULT_URL = CFG.url || "", DEFAULT_KEY = CFG.key || "";
 const CATS = ["Entrées", "Plats", "Desserts", "Boissons"];
 const SAMPLE = [
   ["Entrées","Salade avocat-crevettes","Avocat, crevettes sautées, citron vert et huile d’olive.",3500],
@@ -156,7 +174,7 @@ function draw(){
     if (cat !== "Tous" && cat !== c) return;
     const it = dishes.filter(d => d.categorie === c);
     if (!it.length) return;
-    h += `<h2>${c}</h2>` + it.map(d => `<article class="card"><div class="row"><span>${esc(d.nom)}</span><span class="pr">${P(d.prix)}</span></div><p>${esc(d.description)}</p></article>`).join("");
+    h += `<h2>${c}</h2>` + it.map(d => `<article class="card dish">${d.image_url ? `<img class="th" src="${esc(d.image_url)}" alt="${esc(d.nom)}" loading="lazy">` : ""}<div class="in"><div class="row"><span>${esc(d.nom)}</span><span class="pr">${P(d.prix)}</span></div><p>${esc(d.description)}</p></div></article>`).join("");
   });
   if (sb) $("#m").innerHTML = h || '<p class="msg">Aucun plat dans cette catégorie pour le moment.</p>';
 }
@@ -187,13 +205,44 @@ function renderAdmin(){
   $("#list").innerHTML = CATS.map(c => {
     const it = dishes.filter(d => d.categorie === c);
     return `<h2>${c}</h2>` + (it.map(d => `<div class="card" data-id="${d.id}">
+      <div class="pbox">${d.image_url ? `<img class="th" src="${esc(d.image_url)}" alt="">` : '<div class="th ph0">Pas de photo</div>'}
+        <div class="acts"><label class="btn sec">${d.image_url ? "Changer" : "Ajouter"} la photo<input type="file" accept="image/*" data-photo></label>${d.image_url ? '<button class="btn sec" data-nophoto>Retirer</button>' : ""}</div></div>
       <div class="g2"><input data-f="nom" value="${esc(d.nom)}" aria-label="Nom"><input data-f="prix" type="number" min="0" step="100" value="${esc(d.prix)}" aria-label="Prix"></div>
       <div class="fld"><textarea data-f="description" rows="2" aria-label="Description">${esc(d.description)}</textarea></div>
       <button class="btn del" data-del>Supprimer</button></div>`).join("") || '<p class="msg" style="margin:8px 0">Aucun plat.</p>');
   }).join("");
 }
 
+async function toBlob(file){
+  const img = await new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = URL.createObjectURL(file) });
+  const r = Math.min(1, 900 / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * r); c.height = Math.round(img.naturalHeight * r);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  URL.revokeObjectURL(img.src);
+  return new Promise(res => c.toBlob(res, "image/jpeg", 0.8));
+}
+async function uploadPhoto(file){
+  const blob = await toBlob(file);
+  if (!blob) throw new Error("Photo illisible");
+  const path = Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".jpg";
+  const { error } = await sb.storage.from("plats").upload(path, blob, { contentType: "image/jpeg" });
+  if (error) throw error;
+  return sb.storage.from("plats").getPublicUrl(path).data.publicUrl;
+}
+$("#n-photo").onchange = e => { $("#n-photo-l").textContent = e.target.files[0] ? "Photo choisie ✓" : "Ajouter une photo" };
 $("#list").onchange = async e => {
+  if (e.target.matches("[data-photo]")) {
+    const file = e.target.files[0], card = e.target.closest(".card"); if (!file || !card) return;
+    if (!sb) return toast("Connectez d’abord Supabase");
+    toast("Envoi de la photo…");
+    try {
+      const url = await uploadPhoto(file);
+      const { error } = await sb.from("plats").update({ image_url: url }).eq("id", card.dataset.id);
+      if (error) throw error;
+      toast("Photo enregistrée"); load();
+    } catch(err){ toast("Erreur : " + (err.message || err)) }
+    return;
+  }
   const f = e.target.dataset.f, card = e.target.closest(".card"); if (!f || !card) return;
   if (!sb) return toast("Connectez d’abord Supabase");
   const d = dishes.find(x => x.id == card.dataset.id); if (!d) return;
@@ -205,6 +254,12 @@ $("#list").onchange = async e => {
   d[f] = v; draw(); toast("Modifié");
 };
 $("#list").onclick = async e => {
+  const np = e.target.closest("[data-nophoto]");
+  if (np && sb) {
+    const { error } = await sb.from("plats").update({ image_url: null }).eq("id", np.closest(".card").dataset.id);
+    if (error) return toast("Erreur : " + error.message);
+    toast("Photo retirée"); load(); return;
+  }
   const b = e.target.closest("[data-del]"); if (!b || !sb) return;
   if (!confirm("Supprimer ce plat ?")) return;
   const { error } = await sb.from("plats").delete().eq("id", b.closest(".card").dataset.id);
@@ -215,9 +270,12 @@ $("#add").onclick = async () => {
   if (!sb) return toast("Connectez d’abord Supabase");
   const nom = $("#n-nom").value.trim();
   if (!nom) return toast("Le nom est obligatoire");
-  const { error } = await sb.from("plats").insert({ categorie: $("#n-cat").value, nom, description: $("#n-desc").value.trim(), prix: Math.max(0, parseInt($("#n-prix").value, 10) || 0) });
+  let image_url = null;
+  const file = $("#n-photo").files[0];
+  if (file) { try { toast("Envoi de la photo…"); image_url = await uploadPhoto(file) } catch(err){ return toast("Erreur photo : " + (err.message || err)) } }
+  const { error } = await sb.from("plats").insert({ categorie: $("#n-cat").value, nom, description: $("#n-desc").value.trim(), prix: Math.max(0, parseInt($("#n-prix").value, 10) || 0), image_url });
   if (error) return toast("Erreur : " + error.message);
-  ["#n-nom", "#n-prix", "#n-desc"].forEach(s => $(s).value = "");
+  ["#n-nom", "#n-prix", "#n-desc", "#n-photo"].forEach(s => $(s).value = ""); $("#n-photo-l").textContent = "Ajouter une photo";
   toast("Plat ajouté"); load();
 };
 $("#seed").onclick = async () => {
